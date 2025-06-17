@@ -86,7 +86,7 @@ std::string g_inHdr;
 namespace PE = ImGuiH::PropertyEditor;
 
 namespace gltfr {
-bool g_forceExternalShaders = false;
+bool g_forceExternalShaders = true;
 
 extern PathtraceSettings g_pathtraceSettings;
 

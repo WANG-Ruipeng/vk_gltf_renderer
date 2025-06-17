@@ -22,8 +22,13 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
   const uint2 pixelCoord = uint2(dispatchThreadID.xy);
 
   // Define the Sobel kernel in the x and y directions
-  const float kernelX[9] = float[](-1, 0, 1, -2, 0, 2, -1, 0, 1);
-  const float kernelY[9] = float[](-1, -2, -1, 0, 0, 0, 1, 2, 1);
+  const float kx0 = -1.0, kx1 = 0.0, kx2 = 1.0;
+  const float kx3 = -2.0, kx4 = 0.0, kx5 = 2.0;
+  const float kx6 = -1.0, kx7 = 0.0, kx8 = 1.0;
+
+  const float ky0 = -1.0, ky1 = -2.0, ky2 = -1.0;
+  const float ky3 = 0.0, ky4 = 0.0, ky5 = 0.0;
+  const float ky6 =  1.0, ky7 =  2.0, ky8 =  1.0;
 
   float sumX = 0.0;
   float sumY = 0.0;
@@ -38,10 +43,24 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
       [unroll]
       for (int j = -1; j <= 1; j++)
       {
+        const int index = (i + 1) * 3 + (j + 1);
         const uint2 offset = uint2(i, j);
         const float val = u_R8Buffer[pixelCoord + offset].r;
-        sumX += val * kernelX[(i + 1) * 3 + (j + 1)];
-        sumY += val * kernelY[(i + 1) * 3 + (j + 1)];
+        float kx = 0.0, ky = 0.0;
+        switch (index)
+        {
+        case 0: kx = kx0; ky = ky0; break;
+        case 1: kx = kx1; ky = ky1; break;
+        case 2: kx = kx2; ky = ky2; break;
+        case 3: kx = kx3; ky = ky3; break;
+        case 4: kx = kx4; ky = ky4; break;
+        case 5: kx = kx5; ky = ky5; break;
+        case 6: kx = kx6; ky = ky6; break;
+        case 7: kx = kx7; ky = ky7; break;
+        case 8: kx = kx8; ky = ky8; break;
+        }
+        sumX += val * kx;
+        sumY += val * ky;
       }
     }
   }

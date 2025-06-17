@@ -58,25 +58,27 @@ public:
     if(res.hasSlangCompiler() && g_forceExternalShaders)
     {
       // Slang version
-      std::string             filename = nvh::findFile("silhouette.comp.slang", g_applicationSearchPaths, true);
-      slang::ICompileRequest* request  = res.m_slangC->createCompileRequest(filename);
-      if(SLANG_FAILED(request->compile()))
-      {
-        LOGE("Error compiling shader %s, %s\n", filename.c_str(), request->getDiagnosticOutput());
-        return;
-      }
-      res.m_slangC->getSpirvCode(request, spirvCode);
-      shaderModuleCreateInfo = {
-          .codeSize = spirvCode.size() * sizeof(uint32_t),
-          .pCode    = spirvCode.data(),
-      };
+      //std::string             filename = nvh::findFile("silhouette.comp.slang", g_applicationSearchPaths, true);
+      //printf(">>>>>> FORCING RECOMPILATION OF SHADER: %s\n", filename.c_str());
+      //fflush(stdout);
+      //slang::ICompileRequest* request  = res.m_slangC->createCompileRequest(filename);
+      //if(SLANG_FAILED(request->compile()))
+      //{
+      //  LOGE("Error compiling shader %s, %s\n", filename.c_str(), request->getDiagnosticOutput());
+      //  return;
+      //}
+      //res.m_slangC->getSpirvCode(request, spirvCode);
+      //shaderModuleCreateInfo = {
+      //    .codeSize = spirvCode.size() * sizeof(uint32_t),
+      //    .pCode    = spirvCode.data(),
+      //};
 
       // GLSL version
-      // shaderc::SpvCompilationResult compilationResult =
-      //     res.compileGlslShader("silhouette.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
-      // VkShaderModuleCreateInfo shaderModuleCreateInfo;
-      // if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
-      //   return;
+       shaderc::SpvCompilationResult compilationResult =
+           res.compileGlslShader("silhouette.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
+       //VkShaderModuleCreateInfo shaderModuleCreateInfo;
+       if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
+         return;
     }
     else
     {
@@ -85,7 +87,10 @@ public:
     }
 
     PushComputeDispatcher::setCode(shaderModuleCreateInfo.pCode, shaderModuleCreateInfo.codeSize);
+    // Slang version
     PushComputeDispatcher::getBindings().addBinding(eObjectID, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    // GLSL version
+    PushComputeDispatcher::getBindings().addBinding(eObjectID, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
     PushComputeDispatcher::getBindings().addBinding(eRGBAIImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
     PushComputeDispatcher::finalizePipeline();
 
