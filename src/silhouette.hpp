@@ -76,7 +76,6 @@ public:
       // GLSL version
        shaderc::SpvCompilationResult compilationResult =
            res.compileGlslShader("silhouette.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
-       //VkShaderModuleCreateInfo shaderModuleCreateInfo;
        if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
          return;
     }
@@ -88,7 +87,7 @@ public:
 
     PushComputeDispatcher::setCode(shaderModuleCreateInfo.pCode, shaderModuleCreateInfo.codeSize);
     // Slang version
-    PushComputeDispatcher::getBindings().addBinding(eObjectID, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    // PushComputeDispatcher::getBindings().addBinding(eObjectID, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
     // GLSL version
     PushComputeDispatcher::getBindings().addBinding(eObjectID, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
     PushComputeDispatcher::getBindings().addBinding(eRGBAIImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
