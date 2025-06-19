@@ -59,6 +59,21 @@ if(USE_DRACO)
 endif()
 
 #####################################################################################
+# Adding Embree from third_party
+#
+# 设置Embree库的根目录 (根据您的路径)
+set(EMBREE_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/embree)
+
+# 设置一个“提示”路径，帮助CMake的find_package找到Embree的配置文件
+# 这个路径需要指向包含 embree-config.cmake 的目录
+# 根据Embree 4.4.0的标准结构，它通常在 lib/cmake/embree-4.4.0
+set(embree_DIR ${EMBREE_ROOT_DIR}/lib/cmake/embree-4.4.0)
+
+# 查找Embree包。REQUIRED表示如果找不到，CMake会报错。
+find_package(embree 4 REQUIRED)
+# 查找成功后，CMake会创建一个名为 `embree` 的目标，其中包含了所有信息。
+
+#####################################################################################
 # Additions from packages needed for this sample
 _add_package_VulkanSDK()    # Vulkan dependencies
 _add_package_ShaderC()      # GLSL Compiler
@@ -130,6 +145,7 @@ endif()
 
 # Linking with other libraries
 target_link_libraries(${PROJNAME} PRIVATE nvpro_core)
+target_link_libraries(${PROJNAME} PRIVATE embree)
 target_link_libraries(${PROJNAME} PRIVATE optimized ${LIBRARIES_OPTIMIZED})
 target_link_libraries(${PROJNAME} PRIVATE debug ${LIBRARIES_DEBUG})
 target_link_libraries(${PROJNAME} PRIVATE ${PLATFORM_LIBRARIES})
@@ -184,6 +200,18 @@ endforeach()
 # copies binaries that need to be put next to the exe files (ZLib, etc.)
 #
 _finalize_target( ${PROJNAME} )
+
+if(MSVC)
+    # 查找Embree包中的所有 .dll 文件 (embree4.dll, tbb.dll, etc.)
+    file(GLOB EMBREE_DLLS "${EMBREE_ROOT_DIR}/bin/*.dll")
+
+    add_custom_command(TARGET ${PROJNAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${EMBREE_DLLS}
+        $<TARGET_FILE_DIR:${PROJNAME}>
+        VERBATIM
+    )
+endif()
 
 install(FILES ${SHADER_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${PROJNAME}")
 install(FILES ${SHADER_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${PROJNAME}")

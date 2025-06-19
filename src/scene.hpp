@@ -36,6 +36,7 @@ The scene graph is used to show the hierarchy of the scene in the UI.
 
 */
 
+#include <iostream>
 
 #include <string>
 #include <bitset>
@@ -62,6 +63,12 @@ namespace DH {
 #include "scene_graph_ui.hpp"
 #include "settings.hpp"
 
+// Embree SDF
+#include <embree4/rtcore.h>
+#include <glm/glm.hpp>
+#include "fileformats/tinygltf_utils.hpp"
+#include <glm/gtx/component_wise.hpp>
+#include <glm/gtc/random.hpp>
 
 namespace gltfr {
 
@@ -118,6 +125,8 @@ public:
   DH::SceneFrameInfo m_sceneFrameInfo{};      // Used to pass the scene information to the shaders
   nvvk::Buffer       m_sceneFrameInfoBuffer;  // Buffer for the scene information
 
+  nvvk::Texture m_sdfTexture;
+
 private:
   // Scene creation
   void createVulkanScene(Resources& resources);
@@ -133,6 +142,8 @@ private:
   void destroyDescriptorSet(VkDevice device);
   void writeDescriptorSet(Resources& resources) const;
 
+  // Function for SDF generation
+  void generateSdf(Resources &res);
 
   std::bitset<32>              m_dirtyFlags;               // Flags to indicate what has changed
   AnimationControl             m_animControl;              // Animation control (UI)
@@ -157,3 +168,10 @@ public:
 };
 
 }  // namespace gltfr
+
+// 放在 generateSdf 函数之前
+struct PointQueryUserData
+{
+  RTCScene scene;
+  float *closestDistanceSq;
+};

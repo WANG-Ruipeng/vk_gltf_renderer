@@ -36,6 +36,93 @@ namespace PE = ImGuiH::PropertyEditor;
 
 constexpr uint32_t MAXTEXTURES = 1000;  // Maximum textures allowed in the application
 
+// 1. 自定义上下文结构体，现在它将直接持有 RTCGeometry 句柄
+class GltfEmbreeContext : public RTCPointQueryContext
+{
+  public:
+  RTCGeometry geometry_handle;
+  unsigned int numTriangles;
+};
+
+// 2. 一个标准的点到三角形最近点函数
+glm::vec3 closestPointOnTriangle(const glm::vec3 &p, const glm::vec3 &a, const glm::vec3 &b, const glm::vec3 &c)
+{
+  glm::vec3 ab = b - a, ac = c - a, ap = p - a;
+  float d1 = glm::dot(ab, ap), d2 = glm::dot(ac, ap);
+  if (d1 <= 0 && d2 <= 0)
+    return a;
+  glm::vec3 bp = p - b;
+  float d3 = glm::dot(ab, bp), d4 = glm::dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3)
+    return b;
+  float vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0)
+  {
+    float v = d1 / (d1 - d3);
+    return a + v * ab;
+  }
+  glm::vec3 cp = p - c;
+  float d5 = glm::dot(ab, cp), d6 = glm::dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6)
+    return c;
+  float vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0)
+  {
+    float w = d2 / (d2 - d6);
+    return a + w * ac;
+  }
+  float va = d3 * d6 - d5 * d4;
+  if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0)
+  {
+    float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    return b + w * (c - b);
+  }
+  float denom = 1.0f / (va + vb + vc);
+  float v = vb * denom, w = vc * denom;
+  return a + ab * v + ac * w;
+}
+
+// 完全替换你现有的 rtcPointQueryCallback
+bool rtcPointQueryCallback(RTCPointQueryFunctionArguments *args)
+{
+  // 1. 从 userPtr 获取我们的自定义数据
+  PointQueryUserData *userData = static_cast<PointQueryUserData *>(args->userPtr);
+  float *pClosestDistanceSq = userData->closestDistanceSq;
+
+  // 2. 使用 args->geomID 从场景中动态获取当前命中的几何体
+  RTCGeometry geometry = rtcGetGeometry(userData->scene, args->geomID);
+
+  // 3. 后续代码几乎不变
+  const float *vertexBuffer = static_cast<const float *>(rtcGetGeometryBufferData(geometry, RTC_BUFFER_TYPE_VERTEX, 0));
+  const uint32_t *indexBuffer = static_cast<const uint32_t *>(rtcGetGeometryBufferData(geometry, RTC_BUFFER_TYPE_INDEX, 0));
+
+  if (!vertexBuffer || !indexBuffer)
+    return false;
+
+  // primID 是在当前这个 geometry 内的索引
+  const uint32_t i0 = indexBuffer[args->primID * 3 + 0];
+  const uint32_t i1 = indexBuffer[args->primID * 3 + 1];
+  const uint32_t i2 = indexBuffer[args->primID * 3 + 2];
+
+  const glm::vec3 v0(vertexBuffer[i0 * 3], vertexBuffer[i0 * 3 + 1], vertexBuffer[i0 * 3 + 2]);
+  const glm::vec3 v1(vertexBuffer[i1 * 3], vertexBuffer[i1 * 3 + 1], vertexBuffer[i1 * 3 + 2]);
+  const glm::vec3 v2(vertexBuffer[i2 * 3], vertexBuffer[i2 * 3 + 1], vertexBuffer[i2 * 3 + 2]);
+
+  glm::vec3 queryPosition(args->query->x, args->query->y, args->query->z);
+  glm::vec3 closestPt = closestPointOnTriangle(queryPosition, v0, v1, v2);
+
+  glm::vec3 diff = queryPosition - closestPt;
+  float distSq = glm::dot(diff, diff);
+
+  if (distSq < *pClosestDistanceSq)
+  {
+    *pClosestDistanceSq = distSq;
+    args->query->radius = std::sqrt(distSq);
+    return true;
+  }
+
+  return false;
+}
 
 //--------------------------------------------------------------------------------------------------
 // Initialization of the scene object
@@ -519,6 +606,169 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmd, Settings& settings)
   return true;
 }
 
+void embreeErrorFunc(void *userPtr, RTCError code, const char *str)
+{
+  std::cerr << "Embree Error: " << code << ", " << str << std::endl;
+}
+
+// 请用这个带有硬编码简单场景的版本，替换您 scene.cpp 中的整个 generateSdf 函数
+void gltfr::Scene::generateSdf(Resources &res)
+{
+  if (!m_gltfScene || !m_gltfScene->valid())
+    return;
+  nvh::ScopedTimer st("SDF Generation from glTF");
+
+  // 1. 初始化 Embree
+  RTCDevice embreeDevice = rtcNewDevice(nullptr);
+  RTCScene embreeScene = rtcNewScene(embreeDevice);
+  rtcSetDeviceErrorFunction(embreeDevice, embreeErrorFunc, nullptr);
+
+  // ==================================================================
+  // 从 glTF 动态加载几何体
+  // ==================================================================
+  std::cout << "\n--- Loading geometry from glTF scene into Embree ---" << std::endl;
+
+  const auto &model = m_gltfScene->getModel();
+
+  // 我们遍历所有“渲染节点”，因为它们包含了计算好的世界变换矩阵
+  const auto &renderNodes = m_gltfScene->getRenderNodes();
+
+  for (size_t i = 0; i < renderNodes.size(); ++i)
+  {
+    const auto &node = renderNodes[i];
+    // ==================== 最终修正 ====================
+    // 1. 从 RenderNode 获取 RenderPrimitive 对象
+    const auto &renderPrim = m_gltfScene->getRenderPrimitive(node.renderPrimID);
+
+    // 2. 直接从 RenderPrimitive 解引用指针，得到原始的 primitive 对象
+    const auto &primitive = *renderPrim.pPrimitive;
+    // ===============================================
+
+    // --- a. 提取顶点位置数据 (本地空间) ---
+    if (primitive.attributes.find("POSITION") == primitive.attributes.end())
+      continue;
+
+    const auto &posAccessor = model.accessors[primitive.attributes.at("POSITION")];
+    const auto &posBufferView = model.bufferViews[posAccessor.bufferView];
+    const auto &posBuffer = model.buffers[posBufferView.buffer];
+    const float *vertexBuffer = reinterpret_cast<const float *>(
+        &posBuffer.data[posBufferView.byteOffset + posAccessor.byteOffset]);
+    const int numVertices = static_cast<int>(posAccessor.count);
+    const int vertexStride = posAccessor.ByteStride(posBufferView) / sizeof(float); // 通常是 3
+
+    // --- b. 提取索引数据 ---
+    const auto &indexAccessor = model.accessors[primitive.indices];
+    const auto &indexBufferView = model.bufferViews[indexAccessor.bufferView];
+    const auto &indexBuffer = model.buffers[indexBufferView.buffer];
+    const void *indexData = &indexBuffer.data[indexBufferView.byteOffset + indexAccessor.byteOffset];
+    const int numIndices = static_cast<int>(indexAccessor.count);
+
+    // --- c. 转换索引为 32-bit (Embree需要) ---
+    // GLTF 索引可能是 8-bit, 16-bit, 或 32-bit，我们统一转成 32-bit
+    std::vector<uint32_t> convertedIndices(numIndices);
+    switch (indexAccessor.componentType)
+    {
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+      for (int k = 0; k < numIndices; ++k)
+        convertedIndices[k] = reinterpret_cast<const uint8_t *>(indexData)[k];
+      break;
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+      for (int k = 0; k < numIndices; ++k)
+        convertedIndices[k] = reinterpret_cast<const uint16_t *>(indexData)[k];
+      break;
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+      memcpy(convertedIndices.data(), indexData, numIndices * sizeof(uint32_t));
+      break;
+    default:
+      continue; // 不支持的索引类型
+    }
+
+    // --- d. 转换顶点到世界空间 ---
+    // 获取节点的变换矩阵
+    const glm::mat4 worldMatrix = node.worldMatrix;
+    std::vector<glm::vec3> worldSpaceVertices(numVertices);
+    for (int v = 0; v < numVertices; ++v)
+    {
+      // 从原始缓冲区读取本地坐标
+      glm::vec3 localPos(vertexBuffer[v * vertexStride], vertexBuffer[v * vertexStride + 1], vertexBuffer[v * vertexStride + 2]);
+      // 应用变换
+      worldSpaceVertices[v] = glm::vec3(worldMatrix * glm::vec4(localPos, 1.0f));
+    }
+
+    // --- e. 创建并填充 Embree 几何体 ---
+    RTCGeometry embreeGeom = rtcNewGeometry(embreeDevice, RTC_GEOMETRY_TYPE_TRIANGLE);
+
+    // 使用 rtcSetNewGeometryBuffer，因为我们创建了临时的新缓冲区
+    // Embree 会自己管理这份数据的内存
+    float *embreeVerts = (float *)rtcSetNewGeometryBuffer(embreeGeom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, sizeof(glm::vec3), numVertices);
+    memcpy(embreeVerts, worldSpaceVertices.data(), numVertices * sizeof(glm::vec3));
+
+    unsigned int *embreeIndices = (unsigned int *)rtcSetNewGeometryBuffer(embreeGeom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, sizeof(uint32_t) * 3, numIndices / 3);
+    memcpy(embreeIndices, convertedIndices.data(), numIndices * sizeof(uint32_t));
+
+    rtcCommitGeometry(embreeGeom);
+    // 使用 renderNode 的索引 'i' 作为几何体 ID
+    rtcAttachGeometryByID(embreeScene, embreeGeom, static_cast<unsigned int>(i));
+    rtcReleaseGeometry(embreeGeom); // 添加后可以立即释放
+  }
+
+  rtcCommitScene(embreeScene);
+  std::cout << "--- glTF scene committed to Embree ---" << std::endl;
+
+  nvh::Bbox sceneBbox = m_gltfScene->getSceneBounds();
+  const int resolution = 4; // 可以用一个更高的分辨率
+  std::vector<float> sdfData(resolution * resolution * resolution);
+  glm::vec3 step = sceneBbox.extents() / float(resolution - 1);
+
+  // 遍历体素
+  std::cout << "--- Starting SDF Generation on Simple Scene ---" << std::endl;
+  for (int z = 0; z < resolution; ++z)
+  {
+    for (int y = 0; y < resolution; ++y)
+    {
+      for (int x = 0; x < resolution; ++x)
+      {
+        glm::vec3 queryPos = sceneBbox.min() + glm::vec3(x, y, z) * step;
+        int index = x + y * resolution + z * resolution * resolution;
+
+        float closestDistanceSq = std::numeric_limits<float>::max();
+
+        PointQueryUserData userData = {embreeScene, &closestDistanceSq};
+
+        RTCPointQueryContext context;
+        rtcInitPointQueryContext(&context);
+
+        RTCPointQuery query;
+        query.x = queryPos.x;
+        query.y = queryPos.y;
+        query.z = queryPos.z;
+        query.radius = std::numeric_limits<float>::max();
+        query.time = 0.f;
+
+        rtcPointQuery(embreeScene, &query, &context, rtcPointQueryCallback, &userData);
+
+        std::cout << "Query at (" << queryPos.x << ", " << queryPos.y << ", " << queryPos.z << ") -> ";
+
+        if (closestDistanceSq >= std::numeric_limits<float>::max())
+        {
+          sdfData[index] = 2.0f; // 用一个固定的大值
+          std::cout << "  [Result] No surface found." << std::endl;
+        }
+        else
+        {
+          sdfData[index] = std::sqrt(closestDistanceSq);
+          std::cout << "  [Result] Closest distance found: " << sdfData[index] << std::endl;
+        }
+      }
+    }
+  }
+  std::cout << "--- SDF Generation Finished ---" << std::endl;
+
+  // 清理Embree资源
+  rtcReleaseScene(embreeScene);
+  rtcReleaseDevice(embreeDevice);
+}
+
 //--------------------------------------------------------------------------------------------------
 // Create the Vulkan scene representation
 // This means that the glTF scene is converted into buffers and acceleration structures
@@ -534,6 +784,8 @@ void gltfr::Scene::createVulkanScene(Resources& res)
   nvh::ScopedTimer st(std::string("\n") + __FUNCTION__);
 
   nvvk::ResourceAllocator* alloc = res.m_allocator.get();
+
+  generateSdf(res);
 
   m_gltfSceneVk = std::make_unique<nvvkhl::SceneVk>(res.ctx.device, res.ctx.physicalDevice, alloc);
   m_gltfSceneRtx = std::make_unique<nvvkhl::SceneRtx>(res.ctx.device, res.ctx.physicalDevice, alloc, res.ctx.compute.familyIndex);
