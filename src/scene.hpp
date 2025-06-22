@@ -69,6 +69,7 @@ namespace DH {
 #include "fileformats/tinygltf_utils.hpp"
 #include <glm/gtx/component_wise.hpp>
 #include <glm/gtc/random.hpp>
+#include <embree4/rtcore_ray.h>
 
 namespace gltfr {
 
