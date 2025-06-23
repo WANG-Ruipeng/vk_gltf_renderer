@@ -30,6 +30,7 @@
 #include "create_tangent.hpp"
 #include "nvvkhl/shaders/dh_tonemap.h"
 #include "collapsing_header_manager.h"
+#include "nvh/parallel_work.hpp"
 #include <random>
 
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elemCamera;  // Is accessed elsewhere in the App
@@ -743,102 +744,99 @@ void gltfr::Scene::generateSdf(Resources &res)
   const std::vector<glm::vec3> sampleDirections = generateUniformSphereSamples(numSignSamples);
 
   nvh::Bbox sceneBbox = m_gltfScene->getSceneBounds();
-  const int resolution = 8; // 可以用一个更高的分辨率
+  const int resolution = 64; // 可以用一个更高的分辨率
   std::vector<float> sdfData(resolution * resolution * resolution);
   glm::vec3 step = sceneBbox.extents() / float(resolution - 1);
 
-  // 遍历体素
-  std::cout << "--- Starting SDF Generation with Sign Calculation ---" << std::endl;
-  for (int z = 0; z < resolution; ++z)
-  {
-      for (int y = 0; y < resolution; ++y)
-      {
-          for (int x = 0; x < resolution; ++x)
-          {
-              glm::vec3 queryPos = sceneBbox.min() + glm::vec3(x, y, z) * step;
-              int index = x + y * resolution + z * resolution * resolution;
+  const uint64_t totalVoxels = static_cast<uint64_t>(resolution) * resolution * resolution;
 
-              float closestDistanceSq = std::numeric_limits<float>::max();
-              PointQueryUserData userData = { embreeScene, &closestDistanceSq };
-              RTCPointQueryContext context;
-              rtcInitPointQueryContext(&context);
-              RTCPointQuery query;
-              query.x = queryPos.x;
-              query.y = queryPos.y;
-              query.z = queryPos.z;
-              query.radius = std::numeric_limits<float>::max();
-              query.time = 0.f;
-              rtcPointQuery(embreeScene, &query, &context, rtcPointQueryCallback, &userData);
+  // 遍历体素 (并行版本)
+  std::cout << "--- Starting SDF Generation with Sign Calculation (Parallel) ---" << std::endl;
 
-              // 在这里打印查询点，保持日志清晰
-              std::cout << "Query at (" << queryPos.x << ", " << queryPos.y << ", " << queryPos.z << ") -> ";
+  // 使用正确的 API：nvh::parallel_batches
+  // BATCHSIZE 是一个性能调优参数，默认的 512 对于这种计算密集型任务是个不错的选择。
+  // 你也可以像这样指定它: nvh::parallel_batches<256>(...)
+  nvh::parallel_batches(totalVoxels, [&](uint64_t linear_index)
+                        {
+        // 在任务内部，根据一维索引反算三维坐标
+        const int z = static_cast<int>(linear_index / (resolution * resolution));
+        const int y = static_cast<int>((linear_index / resolution) % resolution);
+        const int x = static_cast<int>(linear_index % resolution);
+  
+        glm::vec3 queryPos = sceneBbox.min() + glm::vec3(x, y, z) * step;
+  
+        // --- 阶段1: 查询无符号距离 ---
+        float closestDistanceSq = std::numeric_limits<float>::max();
+        PointQueryUserData userData = { embreeScene, &closestDistanceSq };
+        RTCPointQueryContext context;
+        rtcInitPointQueryContext(&context);
+        RTCPointQuery query;
+        query.x = queryPos.x;
+        query.y = queryPos.y;
+        query.z = queryPos.z;
+        query.radius = std::numeric_limits<float>::max();
+        query.time = 0.f;
+        rtcPointQuery(embreeScene, &query, &context, rtcPointQueryCallback, &userData);
+  
+        if (closestDistanceSq >= std::numeric_limits<float>::max())
+        {
+            sdfData[linear_index] = sceneBbox.extents().x;
+            return; 
+        }
+  
+        float unsigned_distance = std::sqrt(closestDistanceSq);
+        float final_sdf_distance = unsigned_distance;
+  
+        const float epsilon = 1e-5f;
+  
+        // --- 阶段2: 通过光线投射判断符号 ---
+        if (unsigned_distance > epsilon)
+        {
+            int hitCount = 0;
+            int hitBackCount = 0;
+  
+            for (const auto& dir : sampleDirections)
+            {
+                RTCRayHit rayhit;
+                rayhit.ray.org_x = queryPos.x;
+                rayhit.ray.org_y = queryPos.y;
+                rayhit.ray.org_z = queryPos.z;
+                rayhit.ray.dir_x = dir.x;
+                rayhit.ray.dir_y = dir.y;
+                rayhit.ray.dir_z = dir.z;
+                rayhit.ray.tnear = 0.0f;
+                rayhit.ray.tfar = std::numeric_limits<float>::max();
+                rayhit.ray.mask = -1;
+                rayhit.ray.flags = 0;
+                rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+                rayhit.hit.primID = RTC_INVALID_GEOMETRY_ID;
+  
+                rtcIntersect1(embreeScene, &rayhit);
+  
+                if (rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID)
+                {
+                    hitCount++;
+                    glm::vec3 hitNormal = glm::normalize(glm::vec3(rayhit.hit.Ng_x, rayhit.hit.Ng_y, rayhit.hit.Ng_z));
+                    if (glm::dot(dir, hitNormal) > 0)
+                    {
+                        hitBackCount++;
+                    }
+                }
+            }
+  
+            if (hitCount > 0 && (static_cast<float>(hitBackCount) / hitCount) > 0.5f)
+            {
+                final_sdf_distance *= -1.0f;
+            }
+        }
+        else
+        {
+            final_sdf_distance = 0.0f;
+        }
+  
+        // 将最终计算好的值存入数组
+        sdfData[linear_index] = final_sdf_distance; });
 
-              // 检查是否找到了表面
-              if (closestDistanceSq >= std::numeric_limits<float>::max())
-              {
-                  sdfData[index] = sceneBbox.extents().x; // 用一个比较大的正值
-                  std::cout << "  [Result] No surface found." << std::endl;
-                  continue; // 处理下一个体素
-              }
-
-              float unsigned_distance = std::sqrt(closestDistanceSq);
-              float final_sdf_distance = unsigned_distance; // 使用真实距离初始化
-
-              const float epsilon = 1e-5f;
-
-              if (unsigned_distance > epsilon)
-              {
-                  int hitCount = 0;
-                  int hitBackCount = 0;
-
-                  for (const auto& dir : sampleDirections)
-                  {
-                      RTCRayHit rayhit;
-                      rayhit.ray.org_x = queryPos.x;
-                      rayhit.ray.org_y = queryPos.y;
-                      rayhit.ray.org_z = queryPos.z;
-                      rayhit.ray.dir_x = dir.x;
-                      rayhit.ray.dir_y = dir.y;
-                      rayhit.ray.dir_z = dir.z;
-                      rayhit.ray.tnear = 0.0f;
-                      rayhit.ray.tfar = std::numeric_limits<float>::max();
-                      rayhit.ray.mask = -1;
-                      rayhit.ray.flags = 0;
-                      rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
-                      rayhit.hit.primID = RTC_INVALID_GEOMETRY_ID;
-
-                      // Embree 4 API 调用
-                      rtcIntersect1(embreeScene, &rayhit);
-
-                      if (rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID)
-                      {
-                          hitCount++;
-                          glm::vec3 hitNormal = glm::normalize(glm::vec3(rayhit.hit.Ng_x, rayhit.hit.Ng_y, rayhit.hit.Ng_z));
-                          if (glm::dot(dir, hitNormal) > 0)
-                          {
-                              hitBackCount++;
-                          }
-                      }
-                  }
-
-                  // 如果击中背面的光线超过一半，我们认为点在内部
-                  if (hitCount > 0 && (static_cast<float>(hitBackCount) / hitCount) > 0.5f)
-                  {
-                      final_sdf_distance *= -1.0f;
-                  }
-              }
-              else
-              {
-                  // 如果距离小于 epsilon，我们认为它就在表面上，SDF 值就是 0
-                  final_sdf_distance = 0.0f;
-              }
-
-              // --- 修正 #4: 将最终计算好的值存入数组 ---
-              sdfData[index] = final_sdf_distance;
-              std::cout << "  [Result] Closest distance found: " << sdfData[index] << std::endl;
-          }
-      }
-  }
   std::cout << "--- SDF Generation Finished ---" << std::endl;
 
   // 清理Embree资源
