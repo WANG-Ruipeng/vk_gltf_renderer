@@ -184,6 +184,7 @@ void gltfr::Scene::init(Resources& res)
 void gltfr::Scene::deinit(Resources& res)
 {
   res.m_allocator->destroy(m_sceneFrameInfoBuffer);
+  res.m_allocator->destroy(m_sdfTexture);
 
   destroyDescriptorSet(res.ctx.device);
 
@@ -410,15 +411,21 @@ void gltfr::Scene::createDescriptorSet(VkDevice device)
                             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                             .descriptorCount = MAXTEXTURES,  // Not all will be filled - but pipeline will be cached
                             .stageFlags      = VK_SHADER_STAGE_ALL});
+  layoutBindings.push_back({.binding = SceneBindings::eSdfTexture,
+                            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            .descriptorCount = 1,
+                            .stageFlags = VK_SHADER_STAGE_ALL});
 
   const VkDescriptorBindingFlags flags[] = {
-      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // Flags for binding 0 (uniform buffer)
-      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // Flags for binding 1 (storage buffer)
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Flags for binding 0 (uniform buffer)
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Flags for binding 1 (storage buffer)
       // Flags for binding 2 (texture array):
-      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |                // Can update while in use
-          VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |  // Can update unused entries
-          VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,  // Not all array elements need to be valid (0,2,3 vs 0,1,2,3)
-  };
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |               // Can update while in use
+          VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT | // Can update unused entries
+          VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,              // Not all array elements need to be valid (0,2,3 vs 0,1,2,3)
+
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+    };
   const VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{
       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
       .bindingCount  = uint32_t(layoutBindings.size()),  // matches our number of bindings
@@ -489,6 +496,19 @@ void gltfr::Scene::writeDescriptorSet(Resources& resources) const
                                  .descriptorCount = m_gltfSceneVk->nbTextures(),
                                  .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  .pImageInfo      = descImageInfos.data()});
+
+  if (m_sdfTexture.image != VK_NULL_HANDLE)
+  {
+    VkWriteDescriptorSet sdfWrite = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = m_sceneDescriptorSet,
+        .dstBinding = SceneBindings::eSdfTexture,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &m_sdfTexture.descriptor};
+    writeDescriptorSets.push_back(sdfWrite);
+  }
 
   vkUpdateDescriptorSets(resources.ctx.device, static_cast<uint32_t>(writeDescriptorSets.size()),
                          writeDescriptorSets.data(), 0, nullptr);
@@ -636,11 +656,8 @@ void embreeErrorFunc(void *userPtr, RTCError code, const char *str)
   std::cerr << "Embree Error: " << code << ", " << str << std::endl;
 }
 
-// 请用这个带有硬编码简单场景的版本，替换您 scene.cpp 中的整个 generateSdf 函数
-void gltfr::Scene::generateSdf(Resources &res)
+nvvk::Buffer gltfr::Scene::generateSdf(Resources &res, VkCommandBuffer cmd)
 {
-  if (!m_gltfScene || !m_gltfScene->valid())
-    return;
   nvh::ScopedTimer st("SDF Generation from glTF");
 
   // 1. 初始化 Embree
@@ -839,9 +856,69 @@ void gltfr::Scene::generateSdf(Resources &res)
 
   std::cout << "--- SDF Generation Finished ---" << std::endl;
 
+  // ==================================================================
+  // 1. 创建目标3D纹理 (GPU-Only)
+  // ==================================================================
+  VkDevice device = res.ctx.device;
+  nvvk::ResourceAllocator *alloc = res.m_allocator.get();
+
+  // 如果旧纹理存在，先销毁
+  if (m_sdfTexture.image != VK_NULL_HANDLE)
+  {
+    alloc->destroy(m_sdfTexture);
+  }
+
+  VkExtent3D extent = {(uint32_t)resolution, (uint32_t)resolution, (uint32_t)resolution};
+  VkFormat format = VK_FORMAT_R32_SFLOAT; // 单通道32位浮点格式
+
+  VkImageCreateInfo imageCI = nvvk::makeImage3DCreateInfo(extent, format,
+                                                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, false);
+
+  // 使用默认的 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT 创建图像
+  nvvk::Image image = alloc->createImage(imageCI);
+  VkImageViewCreateInfo viewCI = nvvk::makeImageViewCreateInfo(image.image, imageCI);
+  VkSamplerCreateInfo samplerCI = nvvk::makeSamplerCreateInfo();
+
+  m_sdfTexture = alloc->createTexture(image, viewCI, samplerCI);
+  m_sdfTexture.descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  // 为新创建的纹理命名，便于调试
+  nvvk::DebugUtil(device).DBG_NAME(m_sdfTexture.image);
+
+  // ==================================================================
+  // 2. 创建暂存缓冲区 (Staging Buffer) 并上传数据
+  // ==================================================================
+  VkDeviceSize bufferSize = sdfData.size() * sizeof(float);
+
+  // 使用简单的 createBuffer 签名创建一个CPU可见的缓冲区
+  nvvk::Buffer stagingBuffer = alloc->createBuffer(bufferSize,
+                                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::DebugUtil(device).DBG_NAME(stagingBuffer.buffer, "SdfStagingBuffer"); // 给它一个有意义的名字
+
+  // 将SDF数据拷贝到暂存缓冲区
+  void *mappedData = alloc->map(stagingBuffer);
+  memcpy(mappedData, sdfData.data(), bufferSize);
+  alloc->unmap(stagingBuffer);
+
+  // ==================================================================
+  // 3. 记录并执行拷贝命令
+  // ==================================================================
+  // 转换图像布局，准备接收数据
+  nvvk::cmdBarrierImageLayout(cmd, m_sdfTexture.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  VkBufferImageCopy region = {};
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.layerCount = 1;
+  region.imageExtent = extent;
+  vkCmdCopyBufferToImage(cmd, stagingBuffer.buffer, m_sdfTexture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+  nvvk::cmdBarrierImageLayout(cmd, m_sdfTexture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+  std::cout << "--- SDF data uploaded to GPU as a 3D texture ---" << std::endl;
+
   // 清理Embree资源
   rtcReleaseScene(embreeScene);
   rtcReleaseDevice(embreeDevice);
+
+  return stagingBuffer;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -860,8 +937,6 @@ void gltfr::Scene::createVulkanScene(Resources& res)
 
   nvvk::ResourceAllocator* alloc = res.m_allocator.get();
 
-  generateSdf(res);
-
   m_gltfSceneVk = std::make_unique<nvvkhl::SceneVk>(res.ctx.device, res.ctx.physicalDevice, alloc);
   m_gltfSceneRtx = std::make_unique<nvvkhl::SceneRtx>(res.ctx.device, res.ctx.physicalDevice, alloc, res.ctx.compute.familyIndex);
 
@@ -875,9 +950,13 @@ void gltfr::Scene::createVulkanScene(Resources& res)
     {  // Creating the scene in Vulkan buffers
       cmd = cmd_pool.createCommandBuffer();
       m_gltfSceneVk->create(cmd, *m_gltfScene, false);
+
+      nvvk::Buffer sdfStagingBuffer = generateSdf(res, cmd);
+
       // This method is simpler, but it is not as efficient as the while-loop below
       // m_sceneRtx->create(cmd, *m_scene, *m_sceneVk, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
       cmd_pool.submitAndWait(cmd);
+      alloc->destroy(sdfStagingBuffer);
       res.m_allocator->finalizeAndReleaseStaging();  // Make sure there are no pending staging buffers and clear them up
     }
 

@@ -16,7 +16,8 @@
 START_BINDING(SceneBindings)
 eFrameInfo = 0,
 eSceneDesc = 1,
-eTextures = 2
+eTextures = 2,
+eSdfTexture = 3
 END_BINDING();
 
 START_BINDING(RtxBindings)

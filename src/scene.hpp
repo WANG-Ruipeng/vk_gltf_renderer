@@ -71,6 +71,9 @@ namespace DH {
 #include <glm/gtc/random.hpp>
 #include <embree4/rtcore_ray.h>
 
+#include "nvvk/resourceallocator_vk.hpp"
+#include "nvvk/commands_vk.hpp"
+
 namespace gltfr {
 
 // Scene with glTF model
@@ -144,7 +147,7 @@ private:
   void writeDescriptorSet(Resources& resources) const;
 
   // Function for SDF generation
-  void generateSdf(Resources &res);
+  nvvk::Buffer generateSdf(Resources &res, VkCommandBuffer cmd);
 
   std::bitset<32>              m_dirtyFlags;               // Flags to indicate what has changed
   AnimationControl             m_animControl;              // Animation control (UI)
