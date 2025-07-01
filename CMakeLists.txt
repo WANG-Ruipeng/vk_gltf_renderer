@@ -11,12 +11,13 @@ Message(STATUS "Processing Project ${PROJNAME}:")
 # this cannot be put anywhere else since we still didn't find setup.cmake yet
 if(NOT BASE_DIRECTORY)
 
-  find_path(BASE_DIRECTORY
-    NAMES nvpro_core/cmake/setup.cmake
-    PATHS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../.. ${CMAKE_CURRENT_SOURCE_DIR}/external
-    REQUIRED
-    DOC "Directory containing nvpro_core"
-    )
+find_path(BASE_DIRECTORY
+  NAMES nvpro_core/cmake/setup.cmake
+  PATHS ${CMAKE_CURRENT_SOURCE_DIR}/third_party ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../.. ${CMAKE_CURRENT_SOURCE_DIR}/external
+  REQUIRED
+  DOC "Directory containing nvpro_core"
+  )
+  
 endif()
 if(EXISTS ${BASE_DIRECTORY}/nvpro_core/cmake/setup.cmake)
   set(OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}/bin_x64)
@@ -29,6 +30,7 @@ _add_project_definitions(${PROJNAME})
 
 set(NVPRO_CORE_DIR ${BASE_DIRECTORY}/nvpro_core)
 set(NVPRO_SHADERS_DIR ${NVPRO_CORE_DIR}/nvvkhl/shaders)
+add_definitions("-DNVPRO_CORE_DIR_ABSOLUTE=\"${NVPRO_CORE_DIR}\"")
 
 #####################################################################################
 # Adding Slang
@@ -60,18 +62,10 @@ endif()
 
 #####################################################################################
 # Adding Embree from third_party
-#
-# 设置Embree库的根目录 (根据您的路径)
+
 set(EMBREE_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/embree)
-
-# 设置一个“提示”路径，帮助CMake的find_package找到Embree的配置文件
-# 这个路径需要指向包含 embree-config.cmake 的目录
-# 根据Embree 4.4.0的标准结构，它通常在 lib/cmake/embree-4.4.0
 set(embree_DIR ${EMBREE_ROOT_DIR}/lib/cmake/embree-4.4.0)
-
-# 查找Embree包。REQUIRED表示如果找不到，CMake会报错。
 find_package(embree 4 REQUIRED)
-# 查找成功后，CMake会创建一个名为 `embree` 的目标，其中包含了所有信息。
 
 #####################################################################################
 # Additions from packages needed for this sample

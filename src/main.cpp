@@ -735,6 +735,7 @@ auto main(int argc, char** argv) -> int
   // Search path for shaders within the project
   g_applicationSearchPaths.push_back(NVPSystem::exePath() + std::string(PROJECT_RELDIRECTORY) + "shaders");
   g_applicationSearchPaths.push_back(PROJECT_NVPRO_CORE_RELDIRECTORY);
+  g_applicationSearchPaths.push_back(NVPRO_CORE_DIR_ABSOLUTE);
   // INSTALL_RELDIRECTORY is defined in CMakeLists.txt
   g_applicationSearchPaths.push_back(NVPSystem::exePath() + std::string("GLSL_" PROJECT_NAME));
   g_applicationSearchPaths.push_back(NVPSystem::exePath() + "media");
