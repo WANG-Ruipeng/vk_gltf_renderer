@@ -67,5 +67,6 @@ public:
 std::unique_ptr<Renderer> makeRendererEmpty();
 std::unique_ptr<Renderer> makeRendererPathtracer();
 std::unique_ptr<Renderer> makeRendererRaster();
+std::unique_ptr<Renderer> makeRendererSdf();
 
 }  // namespace gltfr

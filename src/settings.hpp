@@ -48,8 +48,9 @@ struct Settings
   {
     ePathtracer,
     eRaster,
+    eSdf,
   };
-  static constexpr const char* rendererNames[] = {"Pathtracer", "Raster"};
+  static constexpr const char* rendererNames[] = {"Pathtracer", "Raster", "SDF"};
 
 
   int          maxFrames            = 200000;       // Maximum number of frames to render (used by pathtracer)

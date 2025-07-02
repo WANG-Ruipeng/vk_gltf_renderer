@@ -136,7 +136,6 @@ if(USE_DRACO)
   add_draco()
 endif()
 
-
 # Linking with other libraries
 target_link_libraries(${PROJNAME} PRIVATE nvpro_core)
 target_link_libraries(${PROJNAME} PRIVATE embree)
@@ -160,7 +159,8 @@ set(_GLSL_FLAGS
    -I${NVPRO_CORE_DIR} 
    -g
    -D_glsl)
- 
+
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/_autogen)
 # Compiling shaders to Spir-V header
 compile_glsl(
      SOURCE_FILES ${SHADER_SOURCE}

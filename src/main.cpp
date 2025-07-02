@@ -594,6 +594,9 @@ private:
       case Settings::eRaster:
         m_renderer = makeRendererRaster();
         break;
+      case Settings::eSdf:
+        m_renderer = makeRendererSdf();
+        break;
     }
     if(m_renderer)
     {
