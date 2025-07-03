@@ -601,6 +601,14 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmd, Settings& settings)
   m_sceneFrameInfo.viewMatrixI = glm::inverse(m_sceneFrameInfo.viewMatrix);
   m_sceneFrameInfo.camPos      = CameraManip.getEye();
 
+  // Update scene bounding box
+  if(m_gltfScene && m_gltfScene->valid())
+  {
+    nvh::Bbox scene_bbox = m_gltfScene->getSceneBounds();
+    m_sceneFrameInfo.sdf_bbox_min = scene_bbox.min();
+    m_sceneFrameInfo.sdf_bbox_ext = scene_bbox.extents();
+  }
+
   // Update the environment
   m_sceneFrameInfo.envIntensity = glm::vec4(settings.hdrEnvIntensity, settings.hdrEnvIntensity, settings.hdrEnvIntensity, 1.0F);
   m_sceneFrameInfo.envRotation = settings.hdrEnvRotation;

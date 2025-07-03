@@ -101,6 +101,9 @@ struct SceneFrameInfo
   float envBlur;               // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
   int   useSolidBackground;    // Use solid background color (0==false, 1==true)
   vec3  backgroundColor;       // Background color when using solid background
+
+  vec3  sdf_bbox_min;          // Use for SDF bounding box
+  vec3  sdf_bbox_ext;
 };
 
 struct Ray

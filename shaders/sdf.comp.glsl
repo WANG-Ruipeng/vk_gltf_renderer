@@ -1,7 +1,9 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_nonuniform_qualifier : enable
 
 // 包含项目中已有的、用于获取相机矩阵等信息的头文件
+// 注意：这里的 #include 只用于 main 函数内部的结构体定义，不用于 layout
 #include "device_host.h" 
 
 // 定义Compute Shader的本地工作组大小。
@@ -9,7 +11,7 @@
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 // 绑定我们在C++中定义的描述符集
-// Set 0 是我们 RendererSdf 私有的描述符集
+// 使用字面量整数 0, 1, 2 而不是枚举名
 layout(set = 0, binding = 0) uniform _SdfFrameInfo { SceneFrameInfo frameInfo; };
 layout(set = 0, binding = 1) uniform sampler3D sdfTexture;
 layout(set = 0, binding = 2, rgba32f) uniform image2D outputImage;
