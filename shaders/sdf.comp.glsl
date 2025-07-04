@@ -16,16 +16,81 @@ layout(set = 0, binding = 0) uniform _SdfFrameInfo { SceneFrameInfo frameInfo; }
 layout(set = 0, binding = 1) uniform sampler3D sdfTexture;
 layout(set = 0, binding = 2, rgba32f) uniform image2D outputImage;
 
-// SDF采样函数
-float sampleSdf(vec3 pos) {
-    // 检查分母是否为零，防止除以零的错误
-    if (frameInfo.sdf_bbox_ext.x < 0.0001 || frameInfo.sdf_bbox_ext.y < 0.0001 || frameInfo.sdf_bbox_ext.z < 0.0001) {
-        return 1000.0; // 返回一个很大的距离值
+layout(push_constant) uniform _PushConstantSdf {
+    float sdf_slice_depth;
+    int visualization_mode; // 0 = Ray Marching, 1 = Slice View
+};
+
+vec3 sdfToColor(float dist) {
+    // 内部 (dist < 0): 显示为蓝色
+    float epsilon = 0.01;
+    if (dist < -epsilon) {
+        return vec3(0.0, 0.0, 1.0);
     }
-    // 将世界坐标转换为SDF纹理的UVW坐标 (0-1范围)
-    vec3 uvw = (pos - frameInfo.sdf_bbox_min) / frameInfo.sdf_bbox_ext;
-    // 采样并返回距离值。乘以包围盒的最大维度，将归一化的距离转换回世界空间单位
-    return texture(sdfTexture, uvw).r * max(max(frameInfo.sdf_bbox_ext.x, frameInfo.sdf_bbox_ext.y), frameInfo.sdf_bbox_ext.z);
+    // 表面附近 (dist ≈ 0): 显示为绿色
+    else if (abs(dist) <= epsilon) {
+        return vec3(0.0, 1.0, 0.0);
+    }
+    // 外部 (dist > 0): 根据距离远近显示不同亮度的红色
+    else {
+        // 使用 smoothstep 让颜色过渡更平滑
+        float intensity = smoothstep(0.0, max(frameInfo.sdf_bbox_ext.x, frameInfo.sdf_bbox_ext.y) * 0.1, dist);
+        return vec3(intensity, 0.0, 0.0);
+    }
+}
+
+bool is_inside_box(vec3 p) {
+    vec3 uvw = (p - frameInfo.sdf_bbox_min) / frameInfo.sdf_bbox_ext;
+    // all() 函数会检查所有分量是否都为true
+    return all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)));
+}
+
+// 这是用于可视化的函数
+void visualizeSdfSlice(ivec2 pixelCoord, ivec2 imageSize) {
+    // 1. 定义你想要可视化的SDF纹理切片深度
+    // z_slice 的范围是 0.0 到 1.0，代表SDF包围盒从最小Z到最大Z的位置
+    float z_slice = sdf_slice_depth; //  <-- 修改这个值来查看不同的Z轴切片！
+
+    // 2. 将像素坐标转换为SDF的UV坐标
+    vec2 uv = vec2(pixelCoord) / vec2(imageSize);
+
+    // 3. 构建3D纹理坐标 (u, v, w)，其中w是我们的切片深度
+    vec3 uvw = vec3(uv.x, uv.y, z_slice);
+
+    // 4. 从SDF纹理中采样原始距离值（这个值是归一化的）
+    // 注意：我们直接用 texture 函数，而不是 sampleSdf，因为我们想看原始数据
+    float raw_dist = texture(sdfTexture, uvw).r;
+
+    // 5. 将SDF距离值转换为颜色
+    vec3 color = sdfToColor(raw_dist);
+
+    // 6. 将最终颜色写入输出图像
+    imageStore(outputImage, pixelCoord, vec4(color, 1.0));
+}
+
+float sdBox( vec3 p, vec3 c, vec3 b )
+{
+    p = p - c; // 将坐标系移到以包围盒中心为原点
+    vec3 q = abs(p) - b;
+    return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+
+float sampleSdf(vec3 pos) {
+    if (frameInfo.sdf_bbox_ext.x < 0.0001) {
+        return 1000.0;
+    }
+
+    // 首先，检查点是否在包围盒内部
+    if (is_inside_box(pos)) {
+        // 如果在内部，执行我们原来的逻辑：采样SDF纹理
+        vec3 uvw = (pos - frameInfo.sdf_bbox_min) / frameInfo.sdf_bbox_ext;
+        return texture(sdfTexture, uvw).r * max(max(frameInfo.sdf_bbox_ext.x, frameInfo.sdf_bbox_ext.y), frameInfo.sdf_bbox_ext.z);
+    } else {
+        // 如果在外部，计算到包围盒的精确距离
+        vec3 box_center = frameInfo.sdf_bbox_min + frameInfo.sdf_bbox_ext / 2.0;
+        vec3 box_half_extents = frameInfo.sdf_bbox_ext / 2.0;
+        return sdBox(pos, box_center, box_half_extents);
+    }
 }
 
 // 计算SDF表面的法线 (通过梯度)
@@ -41,57 +106,49 @@ vec3 calcNormal(vec3 pos) {
 
 void main()
 {
-    // 获取当前着色器实例正在处理的像素坐标
+    // 获取像素坐标
     ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 imageSize = imageSize(outputImage);
-
-    // 防止越界（当图像尺寸不是工作组大小的整数倍时）
     if (pixelCoord.x >= imageSize.x || pixelCoord.y >= imageSize.y) {
         return;
     }
 
-    // 1. 生成每个像素的相机光线
-    // 将像素坐标转换为NDC坐标(-1到1)
-    vec2 ndc = (vec2(pixelCoord) + 0.5) / vec2(imageSize) * 2.0 - 1.0;
-    
-    // 使用相机逆矩阵计算世界空间中的光线方向
-    vec4 target = frameInfo.projMatrixI * vec4(ndc.x, ndc.y, 1.0, 1.0);
-    vec3 rayDir = normalize(vec3(frameInfo.viewMatrixI * vec4(normalize(target.xyz / target.w), 0.0)));
-    vec3 rayOrigin = frameInfo.camPos;
+    // 模式切换
+    if (visualization_mode == 1)
+    {
+        visualizeSdfSlice(pixelCoord, imageSize);
+    }
+    else // 3D光线步进模式 (新的 sampleSdf 可视化逻辑)
+    {
+        // 1. 生成相机光线
+        vec2 ndc = (vec2(pixelCoord) + 0.5) / vec2(imageSize) * 2.0 - 1.0;
+        vec4 target = frameInfo.projMatrixI * vec4(ndc.x, ndc.y, 1.0, 1.0);
+        vec3 rayDir = normalize(vec3(frameInfo.viewMatrixI * vec4(normalize(target.xyz / target.w), 0.0)));
+        vec3 rayOrigin = frameInfo.camPos;
 
-    // 2. 光线步进 (Ray Marching)
-    float t = 0.0;      // 从相机开始的距离
-    vec3 hitPos = vec3(0); // 命中点
-    bool hit = false;
-    for (int i = 0; i < 128; ++i) { // 最多步进128次
-        vec3 p = rayOrigin + t * rayDir;
-        float dist = sampleSdf(p);
-        
-        // 如果距离非常小，我们认为已经命中了表面
-        if (dist < 0.001) { 
-            hit = true;
-            hitPos = p;
-            break;
+        // ====================================================================
+        //  核心调试逻辑: 可视化 sampleSdf 的返回值
+        // ====================================================================
+
+        // 我们选择一个固定的测试点，例如相机前方 10.0 个单位的点
+        // 你可以调整这个距离来观察不同位置的SDF值
+        float test_distance = 100.0;
+        vec3 test_point = rayOrigin + rayDir * test_distance;
+
+        // 直接调用 sampleSdf 获取该点的距离值
+        float sdf_dist = sampleSdf(test_point);
+
+        // 将这个距离值映射为颜色
+        // 正距离 (外部): 红色 (越远越亮)
+        // 负距离 (内部): 蓝色
+        // 零距离 (表面): 绿色
+        vec3 finalColor = sdfToColor(sdf_dist);
+
+        // 如果点在包围盒外部，我们用紫色叠加，以示区分
+        if (!is_inside_box(test_point)) {
+            finalColor += vec3(0.5, 0.0, 0.5); // 叠加紫色
         }
-        
-        // 步进的距离就是SDF返回的距离，这是球体追踪的核心
-        t += dist;
-        
-        // 如果距离太远，就停止追踪
-        if (t > 2000.0) break;
-    }
 
-    // 3. 计算颜色并写入输出纹理
-    vec3 finalColor = vec3(0.1, 0.1, 0.15); // 背景色
-    if (hit) {
-        // 如果命中，根据法线来可视化
-        vec3 normal = calcNormal(hitPos);
-        // 一个简单的lambert光照
-        vec3 lightDir = normalize(vec3(0.5, 0.8, -0.3));
-        float diffuse = max(dot(normal, lightDir), 0.0);
-        finalColor = vec3(diffuse) + vec3(0.1); // 添加一点环境光
+        imageStore(outputImage, pixelCoord, vec4(finalColor, 1.0));
     }
-    
-    // 将最终颜色写入到输出图像的对应像素位置
-    imageStore(outputImage, pixelCoord, vec4(finalColor, 1.0));
 }

@@ -53,6 +53,8 @@
 #include "nvvk/nsight_aftermath_vk.hpp"
 #include "imgui_mouse_state.hpp"
 
+#define USE_DGBPRINTF 
+
 // #define USE_AFTERMATH
 // For debugging GPU crashes
 //  In CMake, set -DNSIGHT_AFTERMATH_SKD=<path_to_sdk> to have "Aftermath available"

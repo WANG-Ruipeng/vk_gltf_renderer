@@ -93,17 +93,25 @@ struct SceneFrameInfo
   mat4  viewMatrixI;           // inverse view matrix (camera to world)
   Light light[MAX_NB_LIGHTS];  // Light information
   vec4  envIntensity;          // Environment intensity
+
   vec3  camPos;                // Camera position
   int   flags;                 // Use flag bits instead of separate useSky and useSolidBackground
+
   int   nbLights;              // Number of lights
   float envRotation;           // Environment rotation (used for the HDR)
   int   frameCount;            // Current render frame [0, ... [
   float envBlur;               // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
+
   int   useSolidBackground;    // Use solid background color (0==false, 1==true)
   vec3  backgroundColor;       // Background color when using solid background
 
+  int padding;
   vec3  sdf_bbox_min;          // Use for SDF bounding box
+
+  int padding2;
   vec3  sdf_bbox_ext;
+  
+  int   padding3; 
 };
 
 struct Ray
@@ -119,5 +127,10 @@ struct Ray
 #ifndef FLT_MAX
 #define FLT_MAX 3.402823466e+38
 #endif
+
+struct PushConstantSdf {
+  float sdf_slice_depth;
+  int   visualization_mode;
+};
 
 #endif  // HOST_DEVICE_H
